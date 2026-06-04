@@ -3,6 +3,8 @@ import anthropic
 import requests
 import random
 import json
+import time
+import base64
 from io import BytesIO
 from urllib.parse import quote
 from huggingface_hub import InferenceClient
@@ -53,8 +55,16 @@ HF_FREE_MODELS = {
     "Stable Diffusion 2.1":        "stabilityai/stable-diffusion-2-1",
 }
 
+STABLE_HORDE_MODELS = {
+    "SDXL 1.0 (best)":       "SDXL 1.0",
+    "AlbedoBase XL (SDXL)":  "AlbedoBase XL (SDXL)",
+    "Deliberate":             "Deliberate",
+    "Stable Diffusion 1.5":  "stable_diffusion",
+}
+
 GENERATION_MODES = [
     "🆓 Pollinations.ai  (no key needed)",
+    "🐎 Stable Horde  (no key needed)",
     "🤗 HuggingFace Free  (free token)",
     "🔮 Claude Preview  (description only)",
 ]
@@ -225,7 +235,22 @@ with st.sidebar:
             Powered by FLUX & open-source models
         </div>""", unsafe_allow_html=True)
 
-    elif mode == GENERATION_MODES[1]: # HuggingFace free
+    elif mode == GENERATION_MODES[1]: # Stable Horde
+        st.markdown('<div class="sidebar-section-title">🐎 Stable Horde Model</div>', unsafe_allow_html=True)
+        sh_model_label = st.selectbox("Model", list(STABLE_HORDE_MODELS.keys()),
+                                      label_visibility="collapsed")
+        sh_model = STABLE_HORDE_MODELS[sh_model_label]
+        sh_apikey = st.text_input("API Key (optional)", placeholder="0000000000",
+                                  help="Leave blank for anonymous (slower). Free key at stablehorde.net — no credit card.")
+        st.markdown("""
+        <div class="model-info">
+            <div class="model-info-title">ℹ️ Stable Horde</div>
+            Community-donated GPUs · Always free<br>
+            Anonymous key works (lower priority)<br>
+            Free key: stablehorde.net → Register
+        </div>""", unsafe_allow_html=True)
+
+    elif mode == GENERATION_MODES[2]: # HuggingFace free
         st.markdown('<div class="sidebar-section-title">🤗 HuggingFace Model</div>', unsafe_allow_html=True)
         hf_model_label = st.selectbox("Model", list(HF_FREE_MODELS.keys()),
                                       label_visibility="collapsed")
@@ -241,7 +266,7 @@ with st.sidebar:
             No credit card required
         </div>""", unsafe_allow_html=True)
 
-    else:                             # Claude preview
+    else:                             # Claude preview (index 3)
         claude_api_key = st.text_input("Claude API Key", type="password",
                                        placeholder="sk-ant-xxxxxxxxxx",
                                        help="console.anthropic.com — new accounts get free credits.")
@@ -352,7 +377,7 @@ if generate_clicked:
                     url = (
                         f"https://image.pollinations.ai/prompt/{encoded}"
                         f"?width={w}&height={h}&seed={used_seed+i}"
-                        f"&model={poll_model}&nologo=true&enhance=true"
+                        f"&model={poll_model}&nologo=true"
                     )
                     try:
                         resp = requests.get(url, timeout=120)
@@ -367,8 +392,65 @@ if generate_clicked:
                     except Exception as e:
                         st.error(f"Image {i+1} error: {e}")
 
-        # ── MODE 2: HuggingFace free models ───────────────────────────────────
+        # ── MODE 2: Stable Horde ──────────────────────────────────────────────
         elif mode == GENERATION_MODES[1]:
+            apikey = sh_apikey.strip() if sh_apikey.strip() else "0000000000"
+            st.info(f"🐎 Stable Horde · {sh_model} · {w}×{h} · seed={used_seed}")
+            cols = st.columns(min(num_images, 2))
+            with st.spinner("Submitting to Stable Horde (community GPUs — may take 30–120 s)…"):
+                headers = {"apikey": apikey, "Content-Type": "application/json"}
+                for i in range(num_images):
+                    payload = {
+                        "prompt": full_prompt + (" ### " + neg_prompt if neg_prompt.strip() else ""),
+                        "params": {
+                            "sampler_name": "k_euler_a",
+                            "cfg_scale": guidance,
+                            "steps": min(steps, 30),
+                            "width": min(w, 1024),
+                            "height": min(h, 1024),
+                            "n": 1,
+                            "seed": str(used_seed + i),
+                        },
+                        "models": [sh_model],
+                        "nsfw": False,
+                        "censor_nsfw": True,
+                    }
+                    try:
+                        r = requests.post(
+                            "https://stablehorde.net/api/v2/generate/async",
+                            headers=headers, json=payload, timeout=30,
+                        )
+                        r.raise_for_status()
+                        job_id = r.json()["id"]
+
+                        # poll until done
+                        for _ in range(80):
+                            time.sleep(3)
+                            chk = requests.get(
+                                f"https://stablehorde.net/api/v2/generate/check/{job_id}",
+                                headers=headers, timeout=10,
+                            ).json()
+                            if chk.get("done"):
+                                break
+                        else:
+                            st.error(f"Image {i+1}: timed out waiting for Stable Horde.")
+                            continue
+
+                        status = requests.get(
+                            f"https://stablehorde.net/api/v2/generate/status/{job_id}",
+                            headers=headers, timeout=30,
+                        ).json()
+                        img_b64 = status["generations"][0]["img"]
+                        img_bytes = base64.b64decode(img_b64)
+                        with cols[i % 2]:
+                            st.image(BytesIO(img_bytes),
+                                     caption=f"Image {i+1} · seed={used_seed+i} · {sh_model}",
+                                     use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Image {i+1} error: {e}")
+
+        # ── MODE 3: HuggingFace free models ───────────────────────────────────
+        elif mode == GENERATION_MODES[2]:
             if not hf_token.strip():
                 st.error("⚠️ Enter your free HuggingFace token in the sidebar. Sign up at huggingface.co — no credit card.")
             else:
@@ -404,7 +486,7 @@ if generate_clicked:
                     except Exception as e:
                         st.error(f"Connection failed: {e}")
 
-        # ── MODE 3: Claude preview ─────────────────────────────────────────────
+        # ── MODE 4: Claude preview ─────────────────────────────────────────────
         else:
             if not claude_api_key.strip():
                 st.error("⚠️ Enter your Claude API key in the sidebar.")
@@ -460,6 +542,6 @@ else:
         <div style="font-size:48px">🌌</div>
         <div style="font-size:15px">Enter a prompt and click Generate</div>
         <div style="font-size:12px;color:rgba(255,255,255,0.12);margin-top:4px">
-            🆓 Pollinations.ai is selected by default — no API key required
+            🆓 Pollinations.ai or 🐎 Stable Horde — both free, no API key required
         </div>
     </div>""", unsafe_allow_html=True)
