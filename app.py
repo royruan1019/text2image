@@ -1,10 +1,10 @@
 import streamlit as st
 import anthropic
-import requests
 import random
 import json
-import base64
 from io import BytesIO
+from huggingface_hub import InferenceClient
+from huggingface_hub.errors import HfHubHTTPError
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 STYLE_SUFFIXES = {
@@ -320,6 +320,12 @@ with st.sidebar:
         help="Required for real image generation. Leave blank for Claude preview mode.",
     )
 
+    hf_endpoint = st.text_input(
+        "Custom Endpoint URL (optional)",
+        placeholder="https://xyz.endpoints.huggingface.cloud",
+        help="Paste a dedicated HF Inference Endpoint URL. Required for large models like Cosmos3 (64B) that aren't on the free API.",
+    )
+
     st.divider()
     st.markdown('<div class="sidebar-section-title">🎨 Image Style</div>', unsafe_allow_html=True)
 
@@ -436,39 +442,46 @@ if generate_clicked:
         mode_real = bool(hf_token.strip())
 
         if mode_real:
-            # ── Real image generation via HuggingFace ──────────────────────────
-            st.info(f"🔄 Calling HuggingFace `{HF_MODEL}`… seed={used_seed} · {w}×{h} · steps={steps}")
+            # ── Real image generation via HuggingFace InferenceClient ──────────
+            endpoint = hf_endpoint.strip() or None
+            target = endpoint if endpoint else HF_MODEL
+            st.info(f"🔄 Calling `{target}`… seed={used_seed} · {w}×{h} · steps={steps}")
             cols = st.columns(min(num_images, 2))
 
             with st.spinner("Generating images…"):
-                for i in range(num_images):
-                    payload = {
-                        "inputs": full_prompt,
-                        "parameters": {
-                            "negative_prompt": neg_prompt,
-                            "width": w,
-                            "height": h,
-                            "num_inference_steps": steps,
-                            "guidance_scale": guidance,
-                            "seed": used_seed + i,
-                        },
-                    }
-                    try:
-                        resp = requests.post(
-                            f"https://api-inference.huggingface.co/models/{HF_MODEL}",
-                            headers={"Authorization": f"Bearer {hf_token}"},
-                            json=payload,
-                            timeout=120,
-                        )
-                        if resp.status_code == 200:
-                            img_bytes = BytesIO(resp.content)
+                try:
+                    client = InferenceClient(
+                        model=endpoint if endpoint else HF_MODEL,
+                        token=hf_token.strip(),
+                    )
+                    for i in range(num_images):
+                        try:
+                            pil_img = client.text_to_image(
+                                full_prompt,
+                                negative_prompt=neg_prompt,
+                                width=w,
+                                height=h,
+                                num_inference_steps=steps,
+                                guidance_scale=guidance,
+                                seed=used_seed + i,
+                            )
+                            buf = BytesIO()
+                            pil_img.save(buf, format="PNG")
+                            buf.seek(0)
                             col_idx = i % 2
                             with cols[col_idx]:
-                                st.image(img_bytes, caption=f"Image {i+1} · seed={used_seed+i}", use_container_width=True)
-                        else:
-                            st.error(f"Image {i+1} failed: {resp.status_code} — {resp.text[:200]}")
-                    except Exception as e:
-                        st.error(f"Image {i+1} error: {e}")
+                                st.image(buf, caption=f"Image {i+1} · seed={used_seed+i}", use_container_width=True)
+                        except HfHubHTTPError as e:
+                            st.error(f"Image {i+1} — HuggingFace API error: {e}")
+                        except Exception as e:
+                            st.error(f"Image {i+1} error: {e}")
+                except Exception as e:
+                    st.error(f"Failed to connect to HuggingFace: {e}")
+                    st.warning(
+                        f"`{HF_MODEL}` is a 64B model and is **not available on the free inference API**. "
+                        "You need a [HuggingFace Inference Endpoint](https://ui.endpoints.huggingface.co/) "
+                        "or a Space URL. Paste the endpoint URL in the sidebar field above the token."
+                    )
 
         else:
             # ── Preview mode via Claude API ────────────────────────────────────
