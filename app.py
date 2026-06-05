@@ -9,7 +9,6 @@ from io import BytesIO
 from urllib.parse import quote
 from huggingface_hub import InferenceClient
 from huggingface_hub.errors import HfHubHTTPError
-from gradio_client import Client as GradioClient
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 STYLE_SUFFIXES = {
@@ -63,17 +62,10 @@ STABLE_HORDE_MODELS = {
     "Stable Diffusion 1.5":  "stable_diffusion",
 }
 
-HF_SPACES = {
-    "FLUX.1-schnell (official space)": {
-        "space": "black-forest-labs/FLUX.1-schnell",
-        "api": "/infer",
-        "args": lambda prompt, w, h, seed, steps: [prompt, seed, True, w, h, min(steps, 4)],
-    },
-    "FLUX.1-dev (high quality)": {
-        "space": "black-forest-labs/FLUX.1-dev",
-        "api": "/infer",
-        "args": lambda prompt, w, h, seed, steps: [prompt, seed, True, w, h, min(steps, 28), 3.5],
-    },
+HF_ANON_MODELS = {
+    "FLUX.1-schnell (fast)":   "black-forest-labs/FLUX.1-schnell",
+    "Stable Diffusion XL":     "stabilityai/stable-diffusion-xl-base-1.0",
+    "Stable Diffusion 2.1":    "stabilityai/stable-diffusion-2-1",
 }
 
 GENERATION_MODES = [
@@ -250,16 +242,16 @@ with st.sidebar:
             Powered by FLUX & open-source models
         </div>""", unsafe_allow_html=True)
 
-    elif mode == GENERATION_MODES[1]: # HF Spaces
-        st.markdown('<div class="sidebar-section-title">🖼️ HF Space Model</div>', unsafe_allow_html=True)
-        hf_space_label = st.selectbox("Model", list(HF_SPACES.keys()),
-                                      label_visibility="collapsed")
+    elif mode == GENERATION_MODES[1]: # HF Anonymous Inference
+        st.markdown('<div class="sidebar-section-title">🖼️ HF Anon Model</div>', unsafe_allow_html=True)
+        hf_anon_label = st.selectbox("Model", list(HF_ANON_MODELS.keys()),
+                                     label_visibility="collapsed")
         st.markdown("""
         <div class="model-info">
-            <div class="model-info-title">ℹ️ HF Spaces</div>
-            Free community GPU spaces · No signup<br>
-            No token required · FLUX models<br>
-            May queue if space is busy
+            <div class="model-info-title">ℹ️ HF Anonymous Inference</div>
+            Free · No signup · No token required<br>
+            Uses HuggingFace free inference API<br>
+            May be slow if model is loading
         </div>""", unsafe_allow_html=True)
 
     elif mode == GENERATION_MODES[2]: # Stable Horde
@@ -420,28 +412,39 @@ if generate_clicked:
                     except Exception as e:
                         st.error(f"Image {i+1} error: {e}")
 
-        # ── MODE 2: HF Spaces (no key) ────────────────────────────────────────
+        # ── MODE 2: HF Anonymous Inference (no key) ───────────────────────────
         elif mode == GENERATION_MODES[1]:
-            space_cfg = HF_SPACES[hf_space_label]
-            st.info(f"🖼️ HF Space · {hf_space_label} · {w}×{h} · seed={used_seed}")
+            hf_anon_model = HF_ANON_MODELS[hf_anon_label]
+            st.info(f"🖼️ HF Anon · {hf_anon_label} · {w}×{h} · seed={used_seed}")
             cols = st.columns(min(num_images, 2))
-            with st.spinner("Connecting to HuggingFace Space (may queue if busy)…"):
-                try:
-                    gc = GradioClient(space_cfg["space"])
-                    for i in range(num_images):
-                        try:
-                            args = space_cfg["args"](full_prompt, w, h, used_seed + i, steps)
-                            result = gc.predict(*args, api_name=space_cfg["api"])
-                            # result is typically a file path or (path, seed) tuple
-                            img_path = result[0] if isinstance(result, (list, tuple)) else result
+            with st.spinner("Calling HuggingFace free inference (model may take ~20s to load)…"):
+                for i in range(num_images):
+                    try:
+                        payload = {
+                            "inputs": full_prompt,
+                            "parameters": {
+                                "width": w,
+                                "height": h,
+                                "num_inference_steps": min(steps, 4) if "schnell" in hf_anon_model else min(steps, 20),
+                                "seed": used_seed + i,
+                            },
+                        }
+                        resp = requests.post(
+                            f"https://api-inference.huggingface.co/models/{hf_anon_model}",
+                            json=payload,
+                            timeout=120,
+                        )
+                        if resp.status_code == 200:
                             with cols[i % 2]:
-                                st.image(img_path,
+                                st.image(BytesIO(resp.content),
                                          caption=f"Image {i+1} · seed={used_seed+i}",
                                          use_container_width=True)
-                        except Exception as e:
-                            st.error(f"Image {i+1} error: {e}")
-                except Exception as e:
-                    st.error(f"Could not connect to HF Space: {e}")
+                        elif resp.status_code == 503:
+                            st.warning(f"Image {i+1}: Model loading, retry in ~20s. ({resp.json().get('error','')})")
+                        else:
+                            st.error(f"Image {i+1}: HTTP {resp.status_code} — {resp.text[:200]}")
+                    except Exception as e:
+                        st.error(f"Image {i+1} error: {e}")
 
         # ── MODE 3: Stable Horde ──────────────────────────────────────────────
         elif mode == GENERATION_MODES[2]:
