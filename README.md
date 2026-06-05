@@ -2,7 +2,7 @@
 
 View the live demo here:
 
-- [https://royruan1019.github.io/text2image/](https://share.streamlit.io/)
+- [https://royruan1019.github.io/text2image/](https://text2image-cbldwhrufiq5qmfqyurmkq.streamlit.app/)
 
 ## About
 
